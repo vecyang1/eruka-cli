@@ -1,0 +1,16 @@
+[project]
+name = "eruka-cli"
+version = "0.1.4"
+description = "Agent-friendly market and course research CLI inspired by Eurekaa."
+requires-python = ">=3.10"
+dependencies = [
+  "requests>=2.31",
+  "websocket-client>=1.6",
+]
+
+[project.scripts]
+eruka = "eruka_cli.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
