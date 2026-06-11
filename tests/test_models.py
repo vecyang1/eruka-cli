@@ -1,7 +1,36 @@
-from eruka_cli.models import calculate_opportunity
+from eruka_cli.models import calculate_opportunity, summarize_trend
 from eruka_cli.cli import _keyword_items, build_parser
 from eruka_cli.eurekaa_client import _normalize_eurekaa_books
 from eruka_cli.report import render_brief_markdown, slugify
+
+
+def test_missing_course_data_is_not_scored_as_green_field():
+    score = calculate_opportunity({}, {"search_volume": 10_000})
+    assert "course data unavailable" in score.rationale
+    assert score.competition_score == 0.0
+
+
+def test_zero_courses_still_gets_empty_market_floor():
+    score = calculate_opportunity({"courses": 0, "totalStudents": 0}, {})
+    assert score.competition_score == 0.15
+    assert "0 courses" in score.rationale
+
+
+def test_summarize_trend_computes_momentum():
+    points = {f"2026-01-{day:02d}": 50 for day in range(1, 13)}
+    points.update({f"2026-02-{day:02d}": 60 for day in range(1, 13)})
+    result = summarize_trend(points, window=12)
+    assert result["ok"] is True
+    assert result["weeks"] == 24
+    assert result["momentum"] == 0.2
+    assert result["latestValue"] == 60
+
+
+def test_summarize_trend_skips_gaps_and_handles_empty():
+    assert summarize_trend({}) == {"ok": False, "weeks": 0}
+    result = summarize_trend({"2026-01-01": None, "2026-01-08": "bad", "2026-01-15": 70})
+    assert result["ok"] is True
+    assert result["weeks"] == 1
 
 
 def test_slugify_keeps_report_names_readable():

@@ -131,14 +131,25 @@ else:
         check=False,
     )
     if completed.returncode != 0:
-        raise ChromeTokenError(completed.stderr.strip() or f"browser-harness exited {completed.returncode}")
-    lines = [line for line in completed.stdout.splitlines() if line.strip().startswith("{")]
-    if not lines:
-        raise ChromeTokenError("browser-harness did not return a JSON token payload.")
-    value = json.loads(lines[-1])
-    if value.get("error"):
-        raise ChromeTokenError(value["error"])
-    token = value.get("token")
-    if not token:
-        raise ChromeTokenError("Eurekaa tab is present but no in-page API token was found.")
-    return ChromeToken(token=token, email=value.get("email"), tab_url=value.get("href") or "")
+        detail = (completed.stderr.strip() or f"browser-harness exited {completed.returncode}")[:300]
+        raise ChromeTokenError(detail)
+    # The harness may interleave diagnostic JSON lines; pick the first payload that
+    # actually carries a token, falling back to the last recognizable error payload.
+    error_message = None
+    for line in completed.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        if value.get("token"):
+            return ChromeToken(token=value["token"], email=value.get("email"), tab_url=value.get("href") or "")
+        if value.get("error"):
+            error_message = str(value["error"])
+    if error_message:
+        raise ChromeTokenError(error_message)
+    raise ChromeTokenError("browser-harness did not return a JSON token payload.")
