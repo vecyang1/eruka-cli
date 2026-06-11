@@ -9,3 +9,6 @@ research/
 dist/
 build/
 *.egg-info/
+task_plan.md
+findings.md
+progress.md

@@ -1,21 +1,32 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 from typing import Any
 
+import requests
+
 from . import __version__
 from .eurekaa_client import ErukaError, EurekaaClient, resolve_auth
-from .models import calculate_opportunity
+from .models import calculate_opportunity, summarize_trend
 from .report import (
     compact_book,
     compact_course,
     emit_json,
+    fmt_value,
+    format_book_row,
+    format_course_row,
     render_brief_markdown,
     render_summary_markdown,
+    render_trend_markdown,
     write_brief,
 )
+
+EXIT_OK = 0
+EXIT_ERROR = 2
+EXIT_INTERRUPTED = 130
 
 
 def _print(data: str) -> None:
@@ -24,16 +35,47 @@ def _print(data: str) -> None:
         sys.stdout.write("\n")
 
 
-def _keyword_items(volume: dict[str, Any], limit: int) -> list[dict[str, Any]]:
+def _warn(message: str) -> None:
+    sys.stderr.write(f"eruka: warning: {message}\n")
+
+
+def dedupe_keyword_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop alias rows that share identical (volume, cpc, competition) metrics.
+
+    The keyword API returns alias groups ("digital marketing", "dijital marketing", ...)
+    with byte-identical metrics; only the first (canonical) row is informative. Rows
+    with any missing metric are never deduped.
+    """
+    seen: set[tuple[Any, Any, Any]] = set()
+    result = []
+    for item in items:
+        key = (item.get("search_volume"), item.get("cpc"), item.get("competition"))
+        if all(value is not None for value in key):
+            if key in seen:
+                continue
+            seen.add(key)
+        result.append(item)
+    return result
+
+
+def _keyword_items(volume: dict[str, Any], limit: int, dedupe: bool = True) -> list[dict[str, Any]]:
     keywords = volume.get("volumes") or volume.get("keywords") or volume.get("data", {}).get("keywords") or []
     if not isinstance(keywords, list):
         return []
-    return [item for item in keywords if isinstance(item, dict)][:limit]
+    items = [item for item in keywords if isinstance(item, dict)]
+    if items and dedupe:
+        items = dedupe_keyword_items(items)
+    return items[:limit]
 
 
 def _keyword_summary(volume: dict[str, Any]) -> dict[str, Any]:
     summary = volume.get("summary") or volume.get("data", {}).get("summary") or {}
     return summary if isinstance(summary, dict) else {}
+
+
+def _warn_on_unrecognized_volume_shape(volume: dict[str, Any]) -> None:
+    if volume and not _keyword_summary(volume) and not _keyword_items(volume, 1, dedupe=False):
+        _warn(f"keyword volume response had an unrecognized shape (keys: {sorted(volume.keys())[:6]}); treating as no data")
 
 
 def command_doctor(args: argparse.Namespace) -> int:
@@ -49,20 +91,21 @@ def command_doctor(args: argparse.Namespace) -> int:
             status = "ok" if check.get("ok") else "warn"
             detail = ", ".join(f"{k}={v}" for k, v in check.items() if k != "ok")
             _print(f"{status:4} {name}: {detail}")
-    return 0 if ok else (2 if args.from_chrome else 0)
+    return EXIT_OK if ok else EXIT_ERROR
 
 
 def command_auth_status(args: argparse.Namespace) -> int:
     auth = resolve_auth(from_chrome=args.from_chrome)
     payload = {"ok": auth.present, "source": auth.source, "email": auth.email, "token": auth.masked()}
     _print(emit_json(payload) if args.json else f"auth {payload['token']} email={auth.email or '-'}")
-    return 0 if auth.present else 2
+    return EXIT_OK if auth.present else EXIT_ERROR
 
 
 def command_summary(args: argparse.Namespace) -> int:
     client = EurekaaClient()
     summary = client.course_summary(args.keyword)
     volume = client.keyword_volume(args.keyword)
+    _warn_on_unrecognized_volume_shape(volume)
     score = calculate_opportunity(summary, _keyword_summary(volume))
     payload = {
         "keyword": args.keyword,
@@ -74,17 +117,18 @@ def command_summary(args: argparse.Namespace) -> int:
         _print(emit_json(payload))
     else:
         _print(render_summary_markdown(args.keyword, summary, score))
-    return 0
+    return EXIT_OK
 
 
 def command_keyword(args: argparse.Namespace) -> int:
     client = EurekaaClient()
     volume = client.keyword_volume(args.keyword)
+    _warn_on_unrecognized_volume_shape(volume)
     similar = client.similar_keywords(args.keyword)
     payload = {
         "keyword": args.keyword,
         "summary": _keyword_summary(volume),
-        "keywords": _keyword_items(volume, args.limit),
+        "keywords": _keyword_items(volume, args.limit, dedupe=not args.all),
         "similar": similar[: args.limit],
     }
     if args.json:
@@ -92,17 +136,42 @@ def command_keyword(args: argparse.Namespace) -> int:
     else:
         summary = payload["summary"]
         _print(f"# Keyword Research: {args.keyword}\n")
-        _print(f"- Search volume: {summary.get('search_volume')}")
-        _print(f"- CPC: {summary.get('cpc')}")
-        _print(f"- Competition: {summary.get('competition')}\n")
+        _print(f"- Search volume: {fmt_value(summary.get('search_volume'))}")
+        _print(f"- CPC: {fmt_value(summary.get('cpc'))}")
+        _print(f"- Competition: {fmt_value(summary.get('competition'))}\n")
         _print("## Related Keywords")
         for item in payload["keywords"]:
-            _print(f"- {item.get('keyword')}: volume {item.get('search_volume')}, CPC {item.get('cpc')}")
+            _print(
+                f"- {item.get('keyword')}: volume {fmt_value(item.get('search_volume'))}, "
+                f"CPC {fmt_value(item.get('cpc'))}"
+            )
         if payload["similar"]:
             _print("\n## Similar")
             for item in payload["similar"]:
                 _print(f"- {item}")
-    return 0
+    return EXIT_OK
+
+
+def command_trend(args: argparse.Namespace) -> int:
+    client = EurekaaClient()
+    data = client.trend(args.keyword, country_code=args.country)
+    points = data.get("trend") or {}
+    momentum = summarize_trend(points, window=args.window)
+    payload = {
+        "keyword": args.keyword,
+        "country": args.country,
+        "momentum": momentum,
+        "trend": points,
+    }
+    if args.json:
+        _print(emit_json(payload))
+    else:
+        _print(render_trend_markdown(args.keyword, momentum, country=args.country))
+    # An empty series is a valid answer ("no recorded interest"), not an error;
+    # JSON consumers should branch on momentum.ok instead of the exit code.
+    if not momentum.get("ok"):
+        _warn(f"no trend history recorded for '{args.keyword}'")
+    return EXIT_OK
 
 
 def command_courses(args: argparse.Namespace) -> int:
@@ -117,11 +186,8 @@ def command_courses(args: argparse.Namespace) -> int:
     else:
         _print(f"# Courses: {args.keyword}\n")
         for course in payload["courses"]:
-            _print(
-                f"- {course['title']} ({course['platform']}) - "
-                f"{course['students']} students, rating {course['rating']}, price {course['price']}"
-            )
-    return 0
+            _print(format_course_row(course))
+    return EXIT_OK
 
 
 def command_course(args: argparse.Namespace) -> int:
@@ -131,29 +197,39 @@ def command_course(args: argparse.Namespace) -> int:
         raise ErukaError("Course inspection requires ERUKA_API_TOKEN or --from-chrome.")
     course = client.get_course(args.course_id, auth.token)
     _print(emit_json(course))
-    return 0
+    return EXIT_OK
 
 
 def command_book_search(args: argparse.Namespace) -> int:
     client = EurekaaClient()
-    books = [compact_book(book) for book in client.search_books(args.query, args.limit)]
-    payload = {"query": args.query, "books": books}
+    warnings: list[str] = []
+    books = [compact_book(book) for book in client.search_books(args.query, args.limit, warnings=warnings)]
+    for warning in warnings:
+        _warn(warning)
+    payload = {"query": args.query, "books": books, "warnings": warnings}
     if args.json:
         _print(emit_json(payload))
     else:
         _print(f"# Book Research: {args.query}\n")
         for book in books:
-            authors = ", ".join(book.get("authors") or [])
-            _print(f"- {book.get('title')} by {authors or 'Unknown'} ({book.get('publishedDate') or 'n.d.'})")
-    return 0
+            _print(format_book_row(book))
+    return EXIT_OK
 
 
 def command_brief(args: argparse.Namespace) -> int:
     client = EurekaaClient()
     summary = client.course_summary(args.keyword)
     volume = client.keyword_volume(args.keyword)
+    _warn_on_unrecognized_volume_shape(volume)
     keyword_summary = _keyword_summary(volume)
     score = calculate_opportunity(summary, keyword_summary)
+
+    trend_momentum: dict[str, Any] | None = None
+    try:
+        trend_points = client.trend(args.keyword).get("trend") or {}
+        trend_momentum = summarize_trend(trend_points)
+    except (ErukaError, requests.RequestException, OSError) as exc:
+        _warn(f"trend data unavailable: {exc}")
 
     courses: list[dict[str, Any]] = []
     auth_warning = None
@@ -163,10 +239,13 @@ def command_brief(args: argparse.Namespace) -> int:
             courses = [compact_course(row) for row in client.search_courses(args.keyword, args.limit, 1, auth.token)]
         else:
             auth_warning = "No token available; authenticated course examples skipped."
-    except Exception as exc:
+    except (ErukaError, requests.RequestException, OSError) as exc:
         auth_warning = str(exc)
 
-    books = [compact_book(book) for book in client.search_books(args.keyword, args.limit)]
+    book_warnings: list[str] = []
+    books = [compact_book(book) for book in client.search_books(args.keyword, args.limit, warnings=book_warnings)]
+    for warning in book_warnings:
+        _warn(warning)
     payload = {
         "keyword": args.keyword,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -174,15 +253,17 @@ def command_brief(args: argparse.Namespace) -> int:
         "keywordSummary": keyword_summary,
         "keywords": _keyword_items(volume, args.limit * 3),
         "opportunity": score.__dict__,
+        "trend": trend_momentum,
         "courses": courses,
         "books": books,
         "authWarning": auth_warning,
+        "bookWarnings": book_warnings,
     }
 
     if args.json:
         output = emit_json(payload)
         _print(output)
-        return 0
+        return EXIT_OK
 
     markdown = render_brief_markdown(payload)
     if args.out:
@@ -190,7 +271,7 @@ def command_brief(args: argparse.Namespace) -> int:
         _print(str(path))
     else:
         _print(markdown)
-    return 0
+    return EXIT_OK
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -216,8 +297,16 @@ def build_parser() -> argparse.ArgumentParser:
     keyword = sub.add_parser("keyword", help="Keyword volume, CPC, competition, and related ideas.")
     keyword.add_argument("keyword")
     keyword.add_argument("--limit", type=int, default=10)
+    keyword.add_argument("--all", action="store_true", help="Keep alias keyword rows with identical metrics.")
     keyword.add_argument("--json", action="store_true")
     keyword.set_defaults(func=command_keyword)
+
+    trend = sub.add_parser("trend", help="Weekly search-interest trend and momentum for a keyword.")
+    trend.add_argument("keyword")
+    trend.add_argument("--country", help="Two-letter country code (e.g. US, JP); default worldwide.")
+    trend.add_argument("--window", type=int, default=12, help="Momentum window in weeks (default 12).")
+    trend.add_argument("--json", action="store_true")
+    trend.set_defaults(func=command_trend)
 
     courses = sub.add_parser("courses", help="Authenticated detailed course rows.")
     courses.add_argument("keyword")
@@ -256,4 +345,16 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.func(args))
     except ErukaError as exc:
         sys.stderr.write(f"eruka: {exc}\n")
-        return 2
+        return EXIT_ERROR
+    except requests.RequestException as exc:
+        sys.stderr.write(f"eruka: network error: {exc}\n")
+        return EXIT_ERROR
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"eruka: invalid JSON from a data source: {exc}\n")
+        return EXIT_ERROR
+    except OSError as exc:
+        sys.stderr.write(f"eruka: system error: {exc}\n")
+        return EXIT_ERROR
+    except KeyboardInterrupt:
+        sys.stderr.write("eruka: interrupted\n")
+        return EXIT_INTERRUPTED
