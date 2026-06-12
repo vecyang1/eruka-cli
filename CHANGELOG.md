@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.1 - 2026-06-12
+
+### Fixed
+- `courses --json` now includes each course's `id`, so `eruka course <id>` is
+  reachable from the CLI's own output (previously the id was stripped by the
+  compact row format). Found while verifying the authenticated path end-to-end
+  against live Eurekaa GraphQL: auth-status / courses / course / brief
+  `--from-chrome` and `doctor --from-chrome` all confirmed working.
+
 ## 0.2.0 - 2026-06-11
 
 ### Added

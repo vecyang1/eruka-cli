@@ -2,6 +2,7 @@ from pathlib import Path
 
 from eruka_cli.models import calculate_opportunity
 from eruka_cli.report import (
+    compact_course,
     fmt_int,
     fmt_value,
     format_book_row,
@@ -90,6 +91,11 @@ def test_brief_markdown_includes_trend_momentum_line():
 def test_trend_markdown_handles_empty_series():
     markdown = render_trend_markdown("x", {"ok": False, "weeks": 0})
     assert "No trend data available" in markdown
+
+
+def test_compact_course_keeps_id_so_course_command_is_reachable():
+    row = compact_course({"_id": "60e46c32963e87c0c8f5bc77", "title": "T", "platform": "udemy"})
+    assert row["id"] == "60e46c32963e87c0c8f5bc77"
 
 
 def test_course_and_book_rows_render_missing_fields():

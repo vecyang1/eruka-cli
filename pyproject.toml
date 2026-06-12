@@ -1,6 +1,6 @@
 [project]
 name = "eruka-cli"
-version = "0.2.0"
+version = "0.2.1"
 description = "Agent-friendly market and course research CLI inspired by Eurekaa."
 requires-python = ">=3.10"
 dependencies = [

@@ -28,6 +28,8 @@ def fmt_value(value: Any, missing: str = "?") -> str:
 
 def compact_course(course: dict[str, Any]) -> dict[str, Any]:
     return {
+        # Kept so `eruka course <id>` is reachable from `courses --json` output.
+        "id": course.get("_id"),
         "title": course.get("title"),
         "platform": course.get("platform"),
         "students": course.get("students"),
