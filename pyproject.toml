@@ -1,6 +1,7 @@
 [project]
 name = "eruka-cli"
 version = "0.2.1"
+license = "AGPL-3.0-or-later"
 description = "Agent-friendly market and course research CLI inspired by Eurekaa."
 requires-python = ">=3.10"
 dependencies = [
