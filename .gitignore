@@ -12,3 +12,15 @@ build/
 task_plan.md
 findings.md
 progress.md
+.ruff_cache/
+
+# Local private files and indices
+graphify-out/
+PROJECT_LINKS.md
+VAULT.md
+decisions.md
+handoff.md
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+
