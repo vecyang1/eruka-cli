@@ -1,5 +1,13 @@
 # Changelog
 
+## [2026-09-12] - 2026-09-12
+
+### Fixes
+- Fix license placeholder and gitignore ruff cache (`462d6bf`)
+
+### Maintenance
+- Add AGPL-3.0-or-later license (`5872de9`)
+
 ## 0.2.1 - 2026-06-12
 
 ### Fixed
